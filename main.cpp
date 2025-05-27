@@ -7,11 +7,12 @@
 #include <sstream>
 #include <limits>
 #include <filesystem>
+#include <ctime>
 
 using namespace std;
 
+// reg add HKEY_CURRENT_USER\Console /v VirtualTerminalLevel /t REG_DWORD /d 1
 // ANSI color codes for styling
-// need to set this reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1
 #define RESET "\033[0m"
 #define RED "\033[31m"
 #define GREEN "\033[32m"
@@ -19,6 +20,59 @@ using namespace std;
 #define BLUE "\033[34m"
 #define CYAN "\033[36m"
 #define BOLD "\033[1m"
+
+struct Date {
+    int day, month, year;
+
+    Date(int d = 1, int m = 1, int y = 1970) : day(d), month(m), year(y) {}
+
+    static Date fromString(const string& dateStr) {
+        Date date;
+        if (dateStr.size() != 10 || dateStr[2] != '-' || dateStr[5] != '-') {
+            return Date(0, 0, 0); // Invalid date
+        }
+
+        try {
+            date.day = stoi(dateStr.substr(0, 2));
+            date.month = stoi(dateStr.substr(3, 2));
+            date.year = stoi(dateStr.substr(6, 4));
+        } catch (...) {
+            return Date(0, 0, 0); // Invalid date
+        }
+        return date;
+    }
+
+    bool isValid() const {
+        if (month < 1 || month > 12 || day < 1 || year < 1970 || year > 9999) {
+            return false;
+        }
+
+        int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        if (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) {
+            daysInMonth[1] = 29;
+        }
+        return day <= daysInMonth[month - 1];
+    }
+
+    bool isOverdue() const {
+        time_t now = time(nullptr);
+        tm* current = localtime(&now);
+        Date today(current->tm_mday, current->tm_mon + 1, current->tm_year + 1900);
+
+        if (year < today.year) return true;
+        if (year > today.year) return false;
+        if (month < today.month) return true;
+        if (month > today.month) return false;
+        return day < today.day;
+    }
+
+    string toString() const {
+        ostringstream oss;
+        oss << setfill('0') << setw(2) << day << "-"
+            << setw(2) << month << "-" << year;
+        return oss.str();
+    }
+};
 
 string trim(const string& str) {
     size_t first = str.find_first_not_of(" \t\n\r");
@@ -39,17 +93,8 @@ bool parseInt(const string& input, int& result) {
 }
 
 bool isValidDueDate(const string& dueDate) {
-    if (dueDate.size() != 10 || dueDate[2] != '-' || dueDate[5] != '-') return false;
-
-    int day, month, year;
-    char dash1, dash2;
-    istringstream iss(dueDate);
-    iss >> day >> dash1 >> month >> dash2 >> year;
-    if (dash1 != '-' || dash2 != '-' || month < 1 || month > 12 || day < 1) return false;
-
-    int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    if (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) daysInMonth[1] = 29;
-    return day <= daysInMonth[month - 1];
+    Date date = Date::fromString(dueDate);
+    return date.isValid();
 }
 
 bool isValidPriority(int priority) {
@@ -114,12 +159,12 @@ private:
 
     void loadFromFile(const string& user = "") {
         if (user.empty() && !isAdmin) {
-            tasks.clear(); // Clear tasks only for non-admin users loading their own file
+            tasks.clear();
         }
         string fileName = getTaskFileName(user);
         ifstream inFile(fileName);
         if (!inFile.is_open()) {
-            if (user.empty()) nextId = 1; // Reset nextId only for current user
+            if (user.empty()) nextId = 1;
             cout << YELLOW << "[INFO] No task file found for user: " << (user.empty() ? currentUser : user) << RESET << endl;
             return;
         }
@@ -130,7 +175,6 @@ private:
         }
         inFile.close();
 
-        // Parse JSON-like content
         vector<string> taskLines;
         size_t pos = 0;
         while (pos < jsonContent.size()) {
@@ -189,14 +233,13 @@ private:
     }
 
     void loadAllUsersTasks() {
-        tasks.clear(); // Clear once at the start for admin
+        tasks.clear();
         nextId = 1;
         bool foundFiles = false;
         for (const auto& entry : filesystem::directory_iterator(".")) {
             string fileName = entry.path().filename().string();
             if (fileName.find("tasks_") == 0 && fileName.ends_with(".txt")) {
                 string user = fileName.substr(6, fileName.size() - 10);
-                cout << BLUE << "[INFO] Loading tasks for user: " << user << RESET << endl;
                 loadFromFile(user);
                 foundFiles = true;
             }
@@ -214,6 +257,7 @@ public:
         } else {
             loadFromFile();
         }
+        checkOverdueTasks();
     }
 
     size_t getTaskCount() const { return tasks.size(); }
@@ -229,12 +273,13 @@ public:
             cout << RED << "[ERROR] Priority must be between 1 and 5." << RESET << endl;
             return;
         }
-        if (!isValidDueDate(dueDate)) {
+        Date date = Date::fromString(dueDate);
+        if (!date.isValid()) {
             cout << RED << "[ERROR] Invalid due date format. Use DD-MM-YYYY." << RESET << endl;
             return;
         }
 
-        tasks.push_back(Task(nextId++, name, priority, dueDate, false, category, currentUser));
+        tasks.push_back(Task(nextId++, name, priority, date.toString(), false, category, currentUser));
         saveToFile();
         cout << GREEN << "[INFO] Task added successfully." << RESET << endl;
     }
@@ -244,7 +289,15 @@ public:
             if (task.id == id && task.owner == currentUser) {
                 if (!name.empty()) task.name = name;
                 if (isValidPriority(priority)) task.priority = priority;
-                if (isValidDueDate(dueDate)) task.dueDate = dueDate;
+                if (!dueDate.empty() && dueDate != "01-01-1970") {
+                    Date date = Date::fromString(dueDate);
+                    if (date.isValid()) {
+                        task.dueDate = date.toString();
+                    } else {
+                        cout << RED << "[ERROR] Invalid due date format. Use DD-MM-YYYY." << RESET << endl;
+                        return;
+                    }
+                }
                 if (!category.empty()) task.category = category;
                 saveToFile();
                 cout << GREEN << "[INFO] Task ID " << id << " updated successfully." << RESET << endl;
@@ -252,6 +305,36 @@ public:
             }
         }
         cout << RED << "[ERROR] Task not found or you lack permission." << RESET << endl;
+    }
+
+    void checkOverdueTasks() {
+        vector<Task> overdueTasks;
+        for (const Task& task : tasks) {
+            if (!task.done && (isAdmin || task.owner == currentUser)) {
+                Date date = Date::fromString(task.dueDate);
+                if (date.isValid() && date.isOverdue()) {
+                    overdueTasks.push_back(task);
+                }
+            }
+        }
+
+        if (!overdueTasks.empty()) {
+            cout << YELLOW << "\n[WARNING] You have " << overdueTasks.size() << " overdue task(s):" << RESET << endl;
+            cout << CYAN << string(100, '=') << RESET << "\n";
+            cout << CYAN << "| " << left << setw(6) << "ID" << setw(26) << "Task Name" << setw(11) << "Priority"
+                 << setw(13) << "Due Date" << setw(11) << "Status" << setw(12) << "Category"
+                 << setw(18) << (isAdmin ? "Owner" : "") << "|" << RESET << "\n";
+            cout << CYAN << string(100, '=') << RESET << "\n";
+
+            for (const Task& task : overdueTasks) {
+                string status = YELLOW + string("Overdue") + RESET;
+                cout << "| " << left << setw(6) << task.id << setw(26) << task.name.substr(0, 25)
+                     << setw(11) << task.priority << setw(13) << task.dueDate
+                     << setw(20) << status << setw(12) << task.category.substr(0, 11)
+                     << setw(18) << (isAdmin ? task.owner.substr(0, 14) : "") << "|\n";
+            }
+            cout << CYAN << string(100, '=') << RESET << "\n";
+        }
     }
 
     void markAsDoneById(int id) {
@@ -289,6 +372,22 @@ public:
         tasks.erase(it, tasks.end());
         saveToFile();
         cout << GREEN << "[INFO] Task deleted successfully." << RESET << endl;
+    }
+
+    void clearAllTask() {
+        cout << YELLOW << "[WARNING] Are you sure? [Y/N]: " << RESET;
+        char response;
+        cin >> response;
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');  // Clear input buffer
+
+        if (toupper(response) == 'Y') {
+            tasks.clear();
+            nextId = 1;
+            saveToFile();
+            cout << GREEN << "[SUCCESS] All tasks have been cleared successfully!" << RESET << endl;
+        } else {
+            cout << RED << "[FAILED] Cancel the process" << endl;
+        }
     }
 
     void sortTasks(const string& criterion) {
@@ -347,7 +446,13 @@ public:
         cout << CYAN << string(100, '=') << RESET << "\n";
 
         for (const Task& task : filteredTasks) {
-            string status = task.done ? (GREEN + string("Done") + RESET) : (YELLOW + string("Not Done") + RESET);
+            string status;
+            if (task.done) {
+                status = GREEN + string("Done") + RESET;
+            } else {
+                Date date = Date::fromString(task.dueDate);
+                status = date.isValid() && date.isOverdue() ? (YELLOW + string("Overdue") + RESET) : (YELLOW + string("Not Done") + RESET);
+            }
             cout << "| " << left << setw(6) << task.id << setw(26) << task.name.substr(0, 25)
                  << setw(11) << task.priority << setw(13) << task.dueDate
                  << setw(20) << status << setw(12) << task.category.substr(0, 11)
@@ -370,13 +475,17 @@ public:
                 string categoryLower = task.category;
                 transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
                 transform(categoryLower.begin(), categoryLower.end(), categoryLower.begin(), ::tolower);
-                if ((nameLower.find(queryLower) != string::npos ||
-                     categoryLower.find(queryLower) != string::npos) &&
-                    (owner.empty() || task.owner == owner)) {
-                    results.push_back(task);
+
+                // Contains search in name or category
+                if (nameLower.find(queryLower) != string::npos ||
+                    categoryLower.find(queryLower) != string::npos) {
+                    if (owner.empty() || task.owner == owner) {
+                        results.push_back(task);
+                    }
                 }
             }
         }
+
 
         if (results.empty()) {
             cout << YELLOW << "[INFO] No tasks match the query '" << query << "'." << RESET << endl;
@@ -390,7 +499,13 @@ public:
         cout << CYAN << string(100, '=') << RESET << "\n";
 
         for (const Task& task : results) {
-            string status = task.done ? (GREEN + string("Done") + RESET) : (YELLOW + string("Not Done") + RESET);
+            string status;
+            if (task.done) {
+                status = GREEN + string("Done") + RESET;
+            } else {
+                Date date = Date::fromString(task.dueDate);
+                status = date.isValid() && date.isOverdue() ? (YELLOW + string("Overdue") + RESET) : (YELLOW + string("Not Done") + RESET);
+            }
             cout << "|" << left << setw(6) << task.id << setw(26) << task.name.substr(0, 25)
                  << setw(11) << task.priority << setw(14) << task.dueDate
                  << setw(20) << status << setw(12) << task.category.substr(0, 11)
@@ -413,13 +528,10 @@ public:
             line = trim(line);
             if (line.empty()) continue;
 
-            // Find the comma
             size_t commaPos = line.find(',');
             if (commaPos == string::npos) continue;
 
-            // Extract username
             string username = trim(line.substr(0, commaPos));
-            // Remove quotes if present
             if (username.front() == '"' && username.back() == '"') {
                 username = username.substr(1, username.size() - 2);
             }
@@ -461,13 +573,10 @@ public:
             line = trim(line);
             if (line.empty()) continue;
 
-            // Find the comma
             size_t commaPos = line.find(',');
             if (commaPos == string::npos) continue;
 
-            // Extract username
             string storedUser = trim(line.substr(0, commaPos));
-            // Remove quotes if present
             if (storedUser.front() == '"' && storedUser.back() == '"') {
                 storedUser = storedUser.substr(1, storedUser.size() - 2);
             }
@@ -520,11 +629,9 @@ bool userExists(const string& username) {
         line = trim(line);
         if (line.empty()) continue;
 
-        // Find the first comma
         size_t commaPos = line.find(',');
         if (commaPos == string::npos) continue;
 
-        // Extract username (before comma) and remove quotes if present
         string storedUser = trim(line.substr(0, commaPos));
         if (storedUser.front() == '"' && storedUser.back() == '"') {
             storedUser = storedUser.substr(1, storedUser.size() - 2);
@@ -559,7 +666,6 @@ bool registerUser(const string& username, const string& password) {
         return false;
     }
 
-    // If username contains spaces, enclose it in quotes
     string formattedUsername = trimmedUsername;
     if (trimmedUsername.find(' ') != string::npos) {
         formattedUsername = "\"" + trimmedUsername + "\"";
@@ -626,13 +732,13 @@ void runToDoApp(ToDoList& todo) {
         {"4", "Mark Task as Done"}, {"5", "Unmark Task"}, {"6", "View All Tasks"},
         {"7", "View Completed Tasks"}, {"8", "View Incomplete Tasks"},
         {"9", "Sort Tasks"}, {"10", "Search Tasks"}, {"11", "Filter by Category"},
-        {"12", "Logout"}
+        {"12", "Clear All Tasks"},{"13", "Logout"}
     };
 
     vector<pair<string, string>> adminMenuOptions = {
         {"1", "View All Tasks"}, {"2", "View Completed Tasks"}, {"3", "View Incomplete Tasks"},
         {"4", "Sort Tasks"}, {"5", "Search Tasks"}, {"6", "Filter by Category"},
-        {"7", "List All Users"}, {"8", "Remove User"}, {"9", "Logout"}
+        {"7", "List All Users"}, {"8", "Remove User"}, {"9", "Clear All Tasks"},{"10", "Logout"}
     };
 
     const auto& menuOptions = todo.getIsAdmin() ? adminMenuOptions : userMenuOptions;
@@ -691,7 +797,9 @@ void runToDoApp(ToDoList& todo) {
                 cout << BLUE << "Username to remove: " << RESET;
                 getline(cin, owner);
                 todo.removeUser(owner);
-            } else if (choice == "9") {
+            } else if (choice == "9"){
+                todo.clearAllTask();
+            } else if (choice == "10") {
                 cout << GREEN << "[INFO] Logged out successfully." << RESET << endl;
                 break;
             } else {
@@ -714,6 +822,7 @@ void runToDoApp(ToDoList& todo) {
                 if (category.empty()) category = "General";
                 todo.addTask(name, priority, dueDate, category);
             } else if (choice == "2") {
+                todo.showTasks();
                 cout << BLUE << "Task ID: " << RESET;
                 getline(cin, input);
                 if (!parseInt(input, id)) {
@@ -735,6 +844,7 @@ void runToDoApp(ToDoList& todo) {
                 getline(cin, category);
                 todo.editTask(id, name, priority, dueDate, category);
             } else if (choice == "3") {
+                todo.showTasks();
                 cout << BLUE << "Task ID: " << RESET;
                 getline(cin, input);
                 if (!parseInt(input, id)) {
@@ -743,6 +853,7 @@ void runToDoApp(ToDoList& todo) {
                 }
                 todo.deleteTaskById(id);
             } else if (choice == "4") {
+                todo.showTasks("incomplete");
                 cout << BLUE << "Task ID: " << RESET;
                 getline(cin, input);
                 if (!parseInt(input, id)) {
@@ -751,6 +862,7 @@ void runToDoApp(ToDoList& todo) {
                 }
                 todo.markAsDoneById(id);
             } else if (choice == "5") {
+                todo.showTasks("completed");
                 cout << BLUE << "Task ID: " << RESET;
                 getline(cin, input);
                 if (!parseInt(input, id)) {
@@ -765,6 +877,7 @@ void runToDoApp(ToDoList& todo) {
             } else if (choice == "8") {
                 todo.showTasks("incomplete");
             } else if (choice == "9") {
+                todo.showTasks();
                 cout << BLUE << "Sort by (priority, date, name): " << RESET;
                 getline(cin, sortCriterion);
                 todo.sortTasks(sortCriterion);
@@ -776,7 +889,9 @@ void runToDoApp(ToDoList& todo) {
                 cout << BLUE << "Category to filter (e.g., Work, Personal, General): " << RESET;
                 getline(cin, category);
                 todo.showTasks("all", category);
-            } else if (choice == "12") {
+            }else if (choice == "12"){
+                todo.clearAllTask();
+            } else if (choice == "13") {
                 cout << GREEN << "[INFO] Logged out successfully." << RESET << endl;
                 break;
             } else {
@@ -825,10 +940,14 @@ void showAuthMenu() {
     }
 }
 
-int main() {
+void greeting() {
     cout << "\n" << CYAN << string(50, '=') << RESET << "\n";
     cout << CYAN << "|" << BOLD << setw(48) << left << " Welcome to the To-Do List App" << RESET << CYAN << "|" << RESET << "\n";
     cout << CYAN << string(50, '=') << RESET << "\n";
+}
+
+int main() {
+    greeting();
     showAuthMenu();
     return 0;
 }
